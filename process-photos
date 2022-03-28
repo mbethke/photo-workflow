@@ -1,0 +1,380 @@
+#!/usr/bin/perl
+use strict;
+
+package Photo {
+    use 5.024;
+    use warnings;
+    use Moo;
+    use Types::Standard qw/ Str InstanceOf HashRef /;
+    use Scalar::Util 'blessed';
+    use Path::Tiny;
+    use Image::ExifTool ();
+    use DateTime;
+    use File::stat;
+    use IO::Handle;
+    use POSIX 'strftime';
+    use feature 'signatures';
+    no warnings 'experimental::signatures';
+
+    my $EXIFTOOL = Image::ExifTool->new;
+
+    has file => (
+        is => 'rwp',
+        isa => InstanceOf['Path::Tiny'],
+        coerce => sub {
+            my $f = ( blessed( $_[0] ) and $_[0]->isa( 'Path::Tiny' ) ) ? $_[0] : path( $_[0] );
+            $f->openr;
+            return $f;
+        },
+    );
+    has exif => (
+        is => 'lazy',
+        isa => HashRef
+        init_arg => undef,
+        builder => sub { $EXIFTOOL->ImageInfo( $_[0]->file->stringify ) }
+    );
+    has timestamp => ( is => 'lazy', isa => InstanceOf['DateTime'], init_arg => undef, );
+    has _raw_timestamp => ( is => 'lazy', isa => Str, init_arg => undef, );
+
+    use overload '""' => sub { shift->filename };
+
+    sub filename($self) { $self->file->stringify }
+    sub exif_camera_model($self) { $self->exif->{Model} }
+    sub exif_timezone($self) {
+        my $e = $self->exif;
+        return $e->{TimeZone} if exists $e->{TimeZone} and defined $e->{TimeZone};
+        # There's no separate TimeZone field, so let's try the timestamp
+        return ($self->_raw_timestamp =~ /([-+][0-9]{2}:[0-9]{2})$/)[0];
+    }
+
+    sub rename($self, $newname) {
+        my $dir = $self->file->parent->stringify;
+        $dir .= '/' unless substr($dir,-1) eq '/';
+        my $newpath = path($dir)->child($newname)->stringify;
+        $self->file->move( $newpath );
+        $self->_set_file( $newpath );
+    }
+
+    sub _build_timestamp($self) {
+        my $stamp = $self->_raw_timestamp;
+
+        $stamp =~ s/[-+][0-9]{2}:[0-9]{2}$//;                   # Remove timezone offset if present
+        $stamp .= '.00' unless substr( $stamp,-3,1 ) eq '.';    # Add subseconds unless present
+
+        my ($y, $m, $d, $H, $M, $S, $s) = $stamp =~ /^([0-9]{4}):([0-9]{2}):([0-9]{2}) ([0-9]{2}):([0-9]{2}):([0-9]{2})\.([0-9]+)/;
+        die "Unparseable timestamp '$stamp'" unless $s;
+        
+        return DateTime->new(
+            year => $y, month  => $m, day    => $d,
+            hour => $H, minute => $M, second => $S, nanosecond => $s * 10_000_000
+        );
+
+    }
+
+    sub _build__raw_timestamp($self) {
+        my $e = $self->exif;
+        my $stamp;
+
+        for my $key (qw/ SubSecDateTimeOriginal DateTimeOriginal CreateDate /) {
+            $stamp = $e->{$key}, last if exists $e->{$key} and defined $e->{$key};
+        }
+        return $stamp if defined $stamp and $stamp !~ /^0000/;
+        STDERR->print(
+            defined $stamp ? "Invalid timestamp '$stamp'" : "Can't find timestamp (either of SubSecDateTimeOriginal, DateTimeOriginal, or CreateDate)"
+        );
+        $stamp = strftime( "%Y:%m:%d %H:%M:%S", localtime( stat( $self->filename )->mtime ));
+        STDERR->say( " in $self, using filedate $stamp" );
+        return $stamp;
+    }
+}
+
+package App::PhotoProcessor {
+    use 5.024;
+    use warnings;
+    use Moo;
+    use Types::Standard qw/ Str ArrayRef HashRef InstanceOf /;
+    use IO::Handle;
+    use List::Util qw/ any uniq /;
+    use DateTime;
+    use XML::Twig;
+    use File::Find;
+    use feature 'signatures';
+    no warnings 'experimental::signatures';
+
+    use constant DEFAULT_GPXPATH => "$ENV{HOME}/Photos/";
+    use constant GPX_PATTERNS => {
+        btq     => [ qr/^btq1000-([0-9]+)/,                                sub { $1 } ],
+        osmand  => [ qr/^([0-9]{4})-([0-9]{2})-([0-9]{2})[_ ].*\.gpx$/,    sub { "$1$2$3" } ],
+        ttt     => [ qr/^TTT-([0-9]{4})-([0-9]{2})-([0-9]{2})/,            sub { "$1$2$3" } ],
+    };
+
+    my $verbose;
+
+    has opts        => ( is => 'ro', isa => HashRef, required => 1 );
+    has photos      => ( is => 'ro', isa => ArrayRef[InstanceOf['Photo']], required => 1 );
+    has gpx_files   => ( is => 'lazy', isa => ArrayRef );
+    has stripgps_models => ( is => 'ro', isa => ArrayRef[Str], default => sub { [ 'Canon EOS M6' ] } );
+
+    sub BUILDARGS($class,$opts, @photos) {
+        $verbose = $opts->{verbose};
+        return {
+            opts => $opts,
+            photos => [ map { Photo->new( file => $_ ) } @photos ]
+        };
+    }
+
+    sub _build_gpx_files($self) {
+        my $opts = $self->opts;
+        if( $opts->{findgpx} or $opts->{gpxpath} ) {
+            my @paths = exists $opts->{gpxpath} ? $opts->{gpxpath}->@* : DEFAULT_GPXPATH;
+            unshift @paths, '.' unless any { $_ eq '.' } @paths;
+            return $self->_find_gpx_files( \@paths );
+        }
+        return $opts->{gpx};
+    }
+
+    sub _find_gpx_files_fast($self, $paths) {
+        my ($oldest, $newest) = map { sprintf "%d%02d%02d", $_->year, $_->month, $_->day } $self->gpx_cutoff_times;
+        my @files;
+        for my $spec ( values GPX_PATTERNS->%* ) {
+            my ($re, $cb) = $spec->@*;
+            push @files,
+            map { $_->[1] }
+            grep { $_->[0] ge $oldest and $_->[0] le $newest }
+            map { /$re/ ? [ $cb->(), $_ ] : () }
+            map { ( glob("$_/*.gpx"), glob("$_/*.GPX") ) } $paths->@*;
+        }
+        return \@files;
+    }
+
+    sub _find_gpx_files($self, $paths) {
+        my ($oldest, $newest) = map { sprintf "%d%02d%02d", $_->year, $_->month, $_->day } $self->gpx_cutoff_times;
+        my @files;
+
+        File::Find::find(
+            sub {
+                -f and /\.gpx$/i or return;
+                my $timestamp;
+                my $basename = $_;
+                for my $pat ( values GPX_PATTERNS->%* ) {
+                    next unless $basename =~ $pat->[0];
+                    $timestamp = $pat->[1]->();
+                    return;
+                }
+                unless( defined $timestamp ) {
+                    my $dt = $self->_gpx_file_date( $basename ) or return;
+                    $timestamp = sprintf "%d%02d%02d", $dt->year, $dt->month, $dt->day;
+                }
+                push @files, $File::Find::name if $timestamp ge $oldest and $timestamp le $newest;
+            },
+            @$paths
+        );
+        return \@files;
+    }
+
+    # Return a DateTime object for the start date of a GPX file. Uses the <time> metadata element
+    # if available, else the timestamp of the fiorst trackpoint.
+    # TODO: use waypoints if no trackpoints present?
+    sub _gpx_file_date($self, $path) {
+        my $dt;
+        my sub get_time($t, $elem) {
+            my $time = $elem->text_only;
+            return unless length( $time );
+            my ($y, $m, $d, $H, $M, $S) = $time =~ /^([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})(?:\.[0-9]+)?Z/;
+            return unless $S;   # parse error, just try next option
+            $dt = DateTime->new(
+                year => $y, month  => $m, day    => $d,
+                hour => $H, minute => $M, second => $S,
+            );
+            $t->finish_now;     # stop parsing
+        };
+        my $t = XML::Twig->new(
+            twig_roots => {
+                '/gpx/metadata/time' => \&get_time,
+                '/gpx/trk/trkseg/trkpt/time' => \&get_time,
+            },
+        );
+        $t->parsefile( $path );
+        return $dt;
+    }
+
+    sub verbose {
+        say @_ if $verbose;
+    }
+
+    sub photo_time_range($self) {
+        my $oldest = DateTime->new( year => 9999 );
+        my $newest = DateTime->new( year => 1800 );
+        for my $photo ($self->photos->@*) {
+            my $timestamp = $photo->timestamp;
+            $oldest = $timestamp if $timestamp < $oldest;
+            $newest = $timestamp if $timestamp > $newest;
+        }
+        return ($oldest, $newest);
+    }
+
+    sub gpx_cutoff_times($self) {
+        if( exists $self->opts->{months} ) {
+            return (
+                DateTime->now->subtract( months => $self->opts->{months} ),
+                DateTime->now
+            );
+        }
+        my ($oldest, $newest) = $self->photo_time_range;
+        $oldest->subtract( days => 1 );
+        $newest->add( months => 1 );
+        return ($oldest, $newest);
+    }
+
+    sub strip_gps($self) {
+        verbose( "Stripping GPS tags" );
+        my %strip = map { $_ => 1 } $self->stripgps_models->@*;
+        my @matching = grep { exists $strip{ $_->exif_camera_model // '' } } $self->photos->@*
+            or return;
+        system( 'gpscorrelate', '-Mr', map { $_->filename } @matching );
+    }
+
+    sub rotate($self) {
+        verbose( "Rotating images according to EXIF" );
+        system( 'exifautotran', map { $_->filename } $self->photos->@* );
+    }
+
+    sub timezones($self) {
+        return $self->opts->{timeaddforce} if exists $self->opts->{timeaddforce};
+        return uniq map { $_->exif_timezone // $self->opts->{timeadd} } $self->photos->@*;
+    }
+
+    sub correlate_gps($self) {
+        my @gpxfiles = $self->gpx_files->@* or do {
+            verbose( "No GPX files found for relevant time range" );
+            return;
+        };
+
+        for my $timezone ( $self->timezones ) {
+            my $timeadd = $self->opts->{timeadd} // $self->opts->{timeaddforce};
+            my @photos_in_zone = grep { ( $_->exif_timezone // $timeadd ) eq $timezone } $self->photos->@*;
+
+            verbose( "GPS-correlating (fine) for timezone ", $timezone );
+            my @opts = ( '--timeadd', $timezone, '--no-mtime' );
+            _gpscorrelate( \@opts, \@gpxfiles, @photos_in_zone );
+
+            my @tttfiles = grep { /(?:^|\/)TTT/ } @gpxfiles
+                or return;
+            verbose( "GPS-correlating (coarse) for timezone ", $timezone );
+            _gpscorrelate( [ @opts, '--ignore-tracksegs', '--max-dist=600' ], \@tttfiles, @photos_in_zone );
+        }
+    }
+
+    sub rename_with_date($self) {
+        verbose( "Renaming photos to include datestamp" );
+        for my $photo ( $self->photos->@* ) {
+            my $filename = $photo->file->basename;
+            if( $filename =~ /^\d{8}_\d{6}-/ ) {
+                verbose( "Skipping $filename" );
+                next;
+            }
+            my $newname = sprintf(
+                '%s_%s-%s',
+                $photo->timestamp->ymd(''),
+                $photo->timestamp->hms(''),
+                lc $filename
+            );
+            $photo->rename( $newname );
+        }
+    }
+
+    sub check_timezones($self) {
+        my $opts = $self->opts;
+        my $photos = $self->photos;
+
+        return if exists $opts->{timeaddforce};
+        # Don't worry if there are no GPX files to correlate with anyway
+        return unless $self->gpx_files->@*;
+        
+        my @have_tz = grep { defined $_->exif_timezone } @$photos;
+        if( @have_tz < @$photos ) {
+            if( exists $opts->{timeadd} ) {
+                STDERR->say(
+                    sprintf("WARNING: using --timeadd=%s for %d out of %d files",
+                        $opts->{timeadd}, @$photos-@have_tz, 0+@$photos
+                    )
+                );
+            } else {
+                STDERR->say(
+                    sprintf("ERROR: specify --timeadd for %d out of %d files without EXIF time zone info",
+                        @$photos-@have_tz, 0+@$photos
+                    )
+                );
+                exit 1;
+            }
+        }
+    }
+
+    sub process($self) {
+        $self->check_timezones;
+        $self->strip_gps;
+        $self->rotate;
+        $self->correlate_gps;
+        $self->rename_with_date;
+    }
+
+    sub _gpscorrelate($opts, $gpxfiles, @photos) {
+        verbose( "Correlating with GPX files: ", join(' ', $gpxfiles->@*) );
+        system(
+            'gpscorrelate',
+            $opts->@*,
+            ( map { ( '--gps', $_ ) } $gpxfiles->@* ),
+            ( map { $_->filename } @photos ),
+        );
+    }
+
+}
+
+package main {
+    use 5.024;
+    use warnings;
+    use Getopt::Long;
+    use feature 'signatures';
+    no warnings 'experimental::signatures';
+
+    my $opts = {
+        gpx => [],
+    };
+
+    sub usage($exit, $msg='') {
+        my ($prog) = $0 =~ m!(?:.*/)?(.*)!;
+        print $msg if $msg;
+        print <<EOF;
+Usage: $prog [opts] <file ...>
+Options:
+-g --gpx <file>             Use this GPX file(s) for correlation
+-f --findgpx                Find GPX files based on --gpxpath and --months
+-p --gpxpath <path>         Find GPX files in these paths. Implies -f,
+                            Default is ~/Photos and the current directory
+-z --timeadd <offset>       Time offset for images that don't have time zone
+                            EXIF information
+-Z --timeaddforce <offset>  Time offset for all images, overriding EXIF
+-m --months                 Use GPX files starting this many months ago. Default
+                            is between a day before the date of the oldest photo
+                            to a month after the newest.
+-v --verbose                Be chatty
+-h --help                   Print this help
+EOF
+        exit $exit;
+    }
+
+    Getopt::Long::Configure("bundling");
+    GetOptions($opts,
+        'timeadd|z=s',
+        'timeaddforce|Z=s',
+        'gpx|g=s@',
+        'findgpx|f',
+        'gpxpath|p=s@',
+        'months|m=i',
+        'verbose|v',
+        'help|h',
+    ) or usage(1, $!);
+    $opts->{help} and usage(0);
+
+    exit App::PhotoProcessor->new($opts, @ARGV)->process;
+}
