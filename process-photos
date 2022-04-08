@@ -115,7 +115,7 @@ package App::PhotoProcessor {
     has gpx_files   => ( is => 'lazy', isa => ArrayRef );
     has stripgps_models => ( is => 'ro', isa => ArrayRef[Str], default => sub { [ 'Canon EOS M6' ] } );
 
-    sub BUILDARGS($class,$opts, @photos) {
+    sub BUILDARGS($class, $opts, @photos) {
         $verbose = $opts->{verbose};
         return {
             opts => $opts,
@@ -235,10 +235,10 @@ package App::PhotoProcessor {
     }
 
     sub strip_gps($self) {
-        verbose( "Stripping GPS tags" );
         my %strip = map { $_ => 1 } $self->stripgps_models->@*;
         my @matching = grep { exists $strip{ $_->exif_camera_model // '' } } $self->photos->@*
             or return;
+        verbose( "Stripping GPS tags" );
         system( 'gpscorrelate', '-Mr', map { $_->filename } @matching );
     }
 
