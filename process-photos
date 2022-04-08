@@ -123,6 +123,14 @@ package App::PhotoProcessor {
         };
     }
 
+    sub BUILD($self, $args) {
+        for( qw/ timeadd timeaddforce / ) {
+            next unless exists $args->{opts}{$_} and defined $args->{opts}{$_};
+            $args->{opts}{$_} =~ /^ [-+]? [0-9]{2}  (?: :[0-9]{2} )? $/x
+                or die "illegal value '$args->{opts}{$_}' for --$_, must be +/-HH[:MM]\n";
+        }
+    }
+
     sub _build_gpx_files($self) {
         my $opts = $self->opts;
         if( $opts->{findgpx} or $opts->{gpxpath} ) {
