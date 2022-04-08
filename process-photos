@@ -63,28 +63,26 @@ package Photo {
 
         my ($y, $m, $d, $H, $M, $S, $s) = $stamp =~ /^([0-9]{4}):([0-9]{2}):([0-9]{2}) ([0-9]{2}):([0-9]{2}):([0-9]{2})\.([0-9]+)/;
         die "Unparseable timestamp '$stamp'" unless $s;
-        
-        return DateTime->new(
+        my $ds = DateTime->new(
             year => $y, month  => $m, day    => $d,
-            hour => $H, minute => $M, second => $S, nanosecond => $s * 10_000_000
+            hour => $H, minute => $M, second => $S, nanosecond => $s * 1000
         );
-
+        return $ds;
     }
 
     sub _build__raw_timestamp($self) {
         my $e = $self->exif;
+        state @check_keys = qw/ SubSecDateTimeOriginal DateTimeOriginal CreateDate /;
         my $stamp;
 
-        for my $key (qw/ SubSecDateTimeOriginal DateTimeOriginal CreateDate /) {
-            $stamp = $e->{$key}, last if exists $e->{$key} and defined $e->{$key};
+        for (@check_keys) {
+            $stamp = $e->{$_},last if exists $e->{$_} and defined $e->{$_} and $e->{$_} !~ /^0000/;
         }
-        return $stamp if defined $stamp and $stamp !~ /^0000/;
+        return $stamp if defined $stamp;
         STDERR->print(
-            defined $stamp ? "Invalid timestamp '$stamp'" : "Can't find timestamp (either of SubSecDateTimeOriginal, DateTimeOriginal, or CreateDate)"
+            "Can't find a valid timestamp as either of " . join(', ', @check_keys) . ", using filedate for $self"
         );
-        $stamp = strftime( "%Y:%m:%d %H:%M:%S", localtime( stat( $self->filename )->mtime ));
-        STDERR->say( " in $self, using filedate $stamp" );
-        return $stamp;
+        return strftime( "%Y:%m:%d %H:%M:%S", localtime( stat( $self->filename )->mtime ));
     }
 }
 
