@@ -61,7 +61,7 @@ package Photo {
         $stamp =~ s/[-+][0-9]{2}:[0-9]{2}$//;                   # Remove timezone offset if present
         $stamp .= '.00' unless substr( $stamp,-3,1 ) eq '.';    # Add subseconds unless present
 
-        my ($y, $m, $d, $H, $M, $S, $s) = $stamp =~ /^([0-9]{4}):([0-9]{2}):([0-9]{2}) ([0-9]{2}):([0-9]{2}):([0-9]{2})\.([0-9]+)/;
+        my ($y, $m, $d, $H, $M, $S, $s) = $stamp =~ /^([0-9]{4}):([0-9]{2}):([0-9]{2}) ([0-9]{2}):([0-9]{2}):([0-9]{2})Z?\.([0-9]+)/;
         die "Unparseable timestamp '$stamp'" unless $s;
         my $ds = DateTime->new(
             year => $y, month  => $m, day    => $d,
@@ -80,7 +80,7 @@ package Photo {
         }
         return $stamp if defined $stamp;
         STDERR->print(
-            "Can't find a valid timestamp as either of " . join(', ', @check_keys) . ", using filedate for $self"
+            "Can't find a valid timestamp as either of " . join(', ', @check_keys) . ", using filedate for $self\n"
         );
         return strftime( "%Y:%m:%d %H:%M:%S", localtime( stat( $self->filename )->mtime ));
     }
