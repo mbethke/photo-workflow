@@ -261,17 +261,17 @@ package App::PhotoProcessor {
         verbose( "Renaming photos to include datestamp" );
         for my $photo ( $self->photos->@* ) {
             my $filename = $photo->file->basename;
-            if( $filename =~ /^\d{8}_\d{6}-/ ) {
-                verbose( "Skipping $filename" );
-                next;
+            my $newname = lc $filename;
+            # If there's no time stamp in the name yet, add it
+            if( $filename !~ /^\d{8}_\d{6}-/ ) {
+                $newname = sprintf(
+                    '%s_%s-%s',
+                    $photo->timestamp->ymd(''),
+                    $photo->timestamp->hms(''),
+                    $newname
+                );
             }
-            my $newname = sprintf(
-                '%s_%s-%s',
-                $photo->timestamp->ymd(''),
-                $photo->timestamp->hms(''),
-                lc $filename
-            );
-            $photo->rename( $newname );
+            $photo->rename( $newname ) unless $filename eq $newname;
         }
     }
 
