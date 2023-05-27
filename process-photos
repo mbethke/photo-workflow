@@ -139,20 +139,6 @@ package App::PhotoProcessor {
         return $opts->{gpx};
     }
 
-    sub _find_gpx_files_fast($self, $paths) {
-        my ($oldest, $newest) = map { sprintf "%d%02d%02d", $_->year, $_->month, $_->day } $self->gpx_cutoff_times;
-        my @files;
-        for my $spec ( values GPX_PATTERNS->%* ) {
-            my ($re, $cb) = $spec->@*;
-            push @files,
-            map { $_->[1] }
-            grep { $_->[0] ge $oldest and $_->[0] le $newest }
-            map { /$re/ ? [ $cb->(), $_ ] : () }
-            map { ( glob("$_/*.gpx"), glob("$_/*.GPX") ) } $paths->@*;
-        }
-        return \@files;
-    }
-
     sub _find_gpx_files($self, $paths) {
         my ($oldest, $newest) = map { sprintf "%d%02d%02d", $_->year, $_->month, $_->day } $self->gpx_cutoff_times;
         my @files;
