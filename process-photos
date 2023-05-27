@@ -59,7 +59,7 @@ package Photo {
         my $stamp = $self->_raw_timestamp;
 
         $stamp =~ s/[-+][0-9]{2}:[0-9]{2}$//;                   # Remove timezone offset if present
-        $stamp .= '.00' unless substr( $stamp,-3,1 ) eq '.';    # Add subseconds unless present
+        $stamp .= '.00' unless substr( $stamp, -3, 1 ) eq '.';  # Add subseconds unless present
 
         my ($y, $m, $d, $H, $M, $S, $s) = $stamp =~ /^([0-9]{4}):([0-9]{2}):([0-9]{2}) ([0-9]{2}):([0-9]{2}):([0-9]{2})Z?\.([0-9]+)/;
         die "Unparseable timestamp '$stamp'" unless $s;
@@ -78,7 +78,7 @@ package Photo {
         for (@check_keys) {
             $stamp = $e->{$_},last if exists $e->{$_} and defined $e->{$_} and $e->{$_} !~ /^0000/;
         }
-        return $stamp if defined $stamp;
+        return $stamp if defined $stamp and length($stamp) >= 8;
         STDERR->print(
             "Can't find a valid timestamp as either of " . join(', ', @check_keys) . ", using filedate for $self\n"
         );
